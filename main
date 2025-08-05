@@ -1,0 +1,552 @@
+import sys
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtWidgets, QtCore
+from pyqtgraph.parametertree import Parameter, ParameterTree
+from dataclasses import dataclass
+from typing import List, Tuple, Type
+
+# ── Pendulum Configuration ───────────────────────────────────────────────────
+
+@dataclass
+class PendulumConfig:
+    """Configuration class for a double pendulum simulation.
+    
+    Attributes:
+        name: Identifier for the pendulum
+        color: Color for visualization
+        integrator_type: Numerical integration method class
+        theta1: Initial angle of first arm in degrees
+        theta2: Initial angle of second arm in degrees
+        m1: Mass of first bob in kg
+        m2: Mass of second bob in kg
+        l1: Length of first arm in meters
+        l2: Length of second arm in meters
+        g: Gravitational acceleration in m/s²
+    """
+    name: str
+    color: str
+    integrator_type: Type['DoublePendulumBase']
+    theta1: float = 120.0
+    theta2: float = 90.0
+    m1: float = 1.0
+    m2: float = 1.0
+    l1: float = 1.0
+    l2: float = 1.0
+    g: float = 9.81
+
+# ── Pendulum dynamics ─────────────────────────────────────────────────────────
+
+class DoublePendulumBase:
+    """Base class implementing the physics of a double pendulum.
+    
+    This class handles the core physics calculations including:
+    - State derivatives for numerical integration
+    - Position calculations for visualization
+    - Energy calculations for analysis
+    """
+    def __init__(self, config: PendulumConfig):
+        self.config = config
+        self.state = np.array([
+            np.deg2rad(config.theta1),
+            np.deg2rad(config.theta2),
+            0.0, 0.0
+        ], dtype=float)
+        self.m1, self.m2 = config.m1, config.m2
+        self.l1, self.l2 = config.l1, config.l2
+        self.g = config.g
+
+    def deriv(self, s):
+        """Calculate derivatives of the state vector.
+        
+        Args:
+            s: State vector [θ1, θ2, ω1, ω2] where θ are angles and ω are angular velocities
+            
+        Returns:
+            Array of derivatives [ω1, ω2, α1, α2] where α are angular accelerations
+        """
+        th1, th2, w1, w2 = s
+        m1, m2, l1, l2, g = self.m1, self.m2, self.l1, self.l2, self.g
+        delta = th2 - th1
+        denom1 = (m1 + m2)*l1 - m2*l1*np.cos(delta)**2
+        a1 = (
+            m2*l1*w1**2*np.sin(delta)*np.cos(delta)
+            + m2*g*np.sin(th2)*np.cos(delta)
+            + m2*l2*w2**2*np.sin(delta)
+            - (m1 + m2)*g*np.sin(th1)
+        ) / denom1
+        denom2 = (l2/l1)*denom1
+        a2 = (
+            -m2*l2*w2**2*np.sin(delta)*np.cos(delta)
+            + (m1+m2)*g*np.sin(th1)*np.cos(delta)
+            - (m1+m2)*l1*w1**2*np.sin(delta)
+            - (m1+m2)*g*np.sin(th2)
+        ) / denom2
+        return np.array([w1, w2, a1, a2], dtype=float)
+
+    def position(self):
+        """Calculate the positions of both pendulum bobs.
+        
+        Returns:
+            Tuple of (x1, y1, x2, y2) coordinates for both bobs
+        """
+        th1, th2, _, _ = self.state
+        x1 = self.l1 * np.sin(th1)
+        y1 = -self.l1 * np.cos(th1)
+        x2 = x1 + self.l2 * np.sin(th2)
+        y2 = y1 - self.l2 * np.cos(th2)
+        return x1, y1, x2, y2
+
+    def energy(self):
+        """Calculate the total energy of the pendulum system.
+        
+        Returns:
+            Total energy (kinetic + potential) in joules
+        """
+        th1, th2, w1, w2 = self.state
+        m1, m2, l1, l2, g = self.m1, self.m2, self.l1, self.l2, self.g
+        v1x = l1*w1*np.cos(th1); v1y = -l1*w1*np.sin(th1)
+        v2x = v1x + l2*w2*np.cos(th2); v2y = v1y - l2*w2*np.sin(th2)
+        KE = 0.5*m1*(v1x**2+v1y**2) + 0.5*m2*(v2x**2+v2y**2)
+        y1 = -l1*np.cos(th1); y2 = y1 - l2*np.cos(th2)
+        PE = m1*g*y1 + m2*g*y2
+        return KE + PE
+
+class EulerPendulum(DoublePendulumBase):
+    """First-order explicit Euler integration method."""
+    def step(self, dt):
+        self.state += dt * self.deriv(self.state)
+        return self.position()
+
+class RK2Pendulum(DoublePendulumBase):
+    """Second-order Runge-Kutta integration method."""
+    def step(self, dt):
+        s = self.state
+        k1 = self.deriv(s)
+        k2 = self.deriv(s + dt*k1)
+        self.state = s + (dt/2)*(k1 + k2)
+        return self.position()
+
+class RK4Pendulum(DoublePendulumBase):
+    """Fourth-order Runge-Kutta integration method."""
+    def step(self, dt):
+        s = self.state
+        k1 = self.deriv(s)
+        k2 = self.deriv(s + 0.5*dt*k1)
+        k3 = self.deriv(s + 0.5*dt*k2)
+        k4 = self.deriv(s + dt*k3)
+        self.state = s + (dt/6)*(k1 + 2*k2 + 2*k3 + k4)
+        return self.position()
+
+# ── Pendulum Simulation ─────────────────────────────────────────────────────
+
+class PendulumSimulation:
+    """Manages multiple pendulum simulations with data collection and visualization.
+    
+    This class handles:
+    - Multiple pendulum instances with different integration methods
+    - Energy tracking over time
+    - Position history for trace visualization
+    - Time window management for data storage
+    """
+    def __init__(self, configs: List[PendulumConfig]):
+        self.pendulums = [config.integrator_type(config) for config in configs]
+        self.times = []
+        self.energy_data = {config.name: {'ke': [], 'pe': [], 'te': []} 
+                           for config in configs}
+        self.window_size = 10.0  # Time window for energy data
+        self.use_window = False
+        self.trace_data = {config.name: {'x': [], 'y': [], 'times': []} 
+                          for config in configs}
+        self.trace_window = 15.0  # Time window for trace visualization
+
+    def reset(self):
+        """Reset all pendulums to their initial states and clear stored data."""
+        for pend in self.pendulums:
+            pend.state = np.array([
+                np.deg2rad(pend.config.theta1),
+                np.deg2rad(pend.config.theta2),
+                0.0, 0.0
+            ], dtype=float)
+        self.times = []
+        for data in self.energy_data.values():
+            data['ke'] = []
+            data['pe'] = []
+            data['te'] = []
+        self.use_window = False
+
+    def step(self, dt: float) -> List[Tuple[float, float, float, float]]:
+        """Advance the simulation by one time step.
+        
+        Args:
+            dt: Time step in seconds
+            
+        Returns:
+            List of (x1, y1, x2, y2) positions for each pendulum
+        """
+        t = self.times[-1] + dt if self.times else 0.0
+        self.times.append(t)
+        
+        if not self.use_window and t >= self.window_size:
+            self.use_window = True
+        
+        if self.use_window:
+            cutoff_time = t - self.window_size
+            while self.times[0] < cutoff_time:
+                self.times.pop(0)
+                for data in self.energy_data.values():
+                    data['ke'].pop(0)
+                    data['pe'].pop(0)
+                    data['te'].pop(0)
+        
+        positions = []
+        for i, pend in enumerate(self.pendulums):
+            pos = pend.step(dt)
+            positions.append(pos)
+            
+            # Update trace data
+            x1, y1, x2, y2 = pos
+            trace_data = self.trace_data[pend.config.name]
+            trace_data['x'].append(x2)
+            trace_data['y'].append(y2)
+            trace_data['times'].append(t)
+            
+            # Remove old trace points
+            cutoff_time = t - self.trace_window
+            while trace_data['times'] and trace_data['times'][0] < cutoff_time:
+                trace_data['x'].pop(0)
+                trace_data['y'].pop(0)
+                trace_data['times'].pop(0)
+            
+            # Calculate and store energies
+            th1, th2, w1, w2 = pend.state
+            m1, m2, l1, l2, g = pend.m1, pend.m2, pend.l1, pend.l2, pend.g
+            
+            v1x = l1*w1*np.cos(th1); v1y = -l1*w1*np.sin(th1)
+            v2x = v1x + l2*w2*np.cos(th2); v2y = v1y - l2*w2*np.sin(th2)
+            KE = 0.5*m1*(v1x**2+v1y**2) + 0.5*m2*(v2x**2+v2y**2)
+            
+            y1 = -l1*np.cos(th1); y2 = y1 - l2*np.cos(th2)
+            PE = m1*g*y1 + m2*g*y2
+            
+            data = self.energy_data[pend.config.name]
+            data['ke'].append(KE)
+            data['pe'].append(PE)
+            data['te'].append(KE + PE)
+            
+        return positions
+
+# ── Unified Simulator ───────────────────────────────────────────────────────
+
+class PendulumSimulator(QtWidgets.QWidget):
+    """Main GUI widget for the double pendulum simulator.
+    
+    This class implements the complete user interface including:
+    - Parameter controls for each pendulum
+    - Real-time visualization
+    - Energy plots
+    - Simulation controls
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.initUI()
+        self.initSimulation()
+
+    def initUI(self):
+        """Initialize the user interface components."""
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        
+        # Left panel setup
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        
+        # Global parameters
+        global_params = [
+            {'name': 'dt (s)', 'type': 'float', 'value': 0.01, 'step': 0.001, 'limits': [0, 5]},
+            {'name': 'g (m/s²)', 'type': 'float', 'value': 9.81, 'step': 0.1}
+        ]
+        self.global_params = Parameter.create(name='Global Parameters', type='group', children=global_params)
+        self.global_tree = ParameterTree()
+        self.global_tree.setParameters(self.global_params, showTop=False)
+        self.global_params.child('dt (s)').sigValueChanged.connect(self.update_dt)
+        left_layout.addWidget(self.global_tree)
+        
+        # Pendulum parameter tabs
+        self.pendulum_tabs = QtWidgets.QTabWidget()
+        self.pendulum_params = []
+        self.integrator_buttons = []
+        
+        for i in range(3):
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            
+            # Integration method selection
+            integrator_group = QtWidgets.QButtonGroup()
+            euler_btn = QtWidgets.QRadioButton("Euler")
+            rk2_btn = QtWidgets.QRadioButton("RK2")
+            rk4_btn = QtWidgets.QRadioButton("RK4")
+            
+            if i == 0:
+                euler_btn.setChecked(True)
+            elif i == 1:
+                rk2_btn.setChecked(True)
+            else:
+                rk4_btn.setChecked(True)
+                
+            integrator_group.addButton(euler_btn)
+            integrator_group.addButton(rk2_btn)
+            integrator_group.addButton(rk4_btn)
+            self.integrator_buttons.append(integrator_group)
+            
+            integrator_layout = QtWidgets.QHBoxLayout()
+            integrator_layout.addWidget(QtWidgets.QLabel("Integration Type:"))
+            integrator_layout.addWidget(euler_btn)
+            integrator_layout.addWidget(rk2_btn)
+            integrator_layout.addWidget(rk4_btn)
+            integrator_layout.addStretch()
+            
+            tab_layout.addLayout(integrator_layout)
+            
+            # Pendulum parameters
+            params = [
+                {'name': 'theta1 (°)', 'type': 'float', 'value': 120, 'step': 1, 'limits': [0, 360]},
+                {'name': 'theta2 (°)', 'type': 'float', 'value': 90, 'step': 1, 'limits': [0, 360]},
+                {'name': 'm1 (kg)', 'type': 'float', 'value': 1.0, 'step': 0.1, 'limits': [0.1, 10]},
+                {'name': 'm2 (kg)', 'type': 'float', 'value': 1.0, 'step': 0.1, 'limits': [0.1, 10]},
+                {'name': 'l1 (m)', 'type': 'float', 'value': 1.0, 'step': 0.1, 'limits': [0.1, 5]},
+                {'name': 'l2 (m)', 'type': 'float', 'value': 1.0, 'step': 0.1, 'limits': [0.1, 5]}
+            ]
+            p = Parameter.create(name=f'Pendulum {i+1}', type='group', children=params)
+            self.pendulum_params.append(p)
+            
+            tree = ParameterTree()
+            tree.setParameters(p, showTop=False)
+            tab_layout.addWidget(tree)
+            
+            self.pendulum_tabs.addTab(tab, f"Pendulum {i+1}")
+        
+        left_layout.addWidget(self.pendulum_tabs)
+
+        # Instructions text
+        instructions = QtWidgets.QTextEdit()
+        instructions.setReadOnly(True)
+        instructions.setMaximumHeight(200)
+        instructions.setHtml("""
+        <h3>Instructions:</h3>
+        <p><b>Global Parameters:</b><br>
+        - dt: Time step for simulation (smaller = more accurate but slower)<br>
+        - g: Gravitational acceleration</p>
+        
+        <p><b>Pendulum Parameters:</b><br>
+        - theta1, theta2: Initial angles in degrees (0-360)<br>
+        - m1, m2: Masses of the bobs in kg<br>
+        - l1, l2: Lengths of the arms in meters</p>
+        
+        <p><b>Integration Methods:</b><br>
+        - Euler: Fast but less accurate<br>
+        - RK2: Better accuracy, moderate speed<br>
+        - RK4: Most accurate but slowest</p>
+        
+        <p><b>Controls:</b><br>
+        - Start/Pause: Toggle simulation<br>
+        - Reset: Return to initial state</p>
+        """)
+        left_layout.addWidget(instructions)
+
+        # Control buttons
+        self.start_btn = QtWidgets.QPushButton("Start")
+        self.start_btn.clicked.connect(self.toggle)
+        self.reset_btn = QtWidgets.QPushButton("Reset")
+        self.reset_btn.clicked.connect(self.resetSimulation)
+        left_layout.addWidget(self.start_btn)
+        left_layout.addWidget(self.reset_btn)
+        
+        left_layout.addStretch()
+        
+        # Center panel (main simulation)
+        center_panel = QtWidgets.QWidget()
+        center_layout = QtWidgets.QVBoxLayout(center_panel)
+        
+        self.anim_plot = pg.PlotWidget(title="Pendulum")
+        self.anim_plot.setAspectLocked(True)
+        self.anim_plot.showGrid(x=True, y=True)
+        self.anim_plot.setLabel('bottom', 'x', units='m')
+        self.anim_plot.setLabel('left', 'y', units='m')
+        
+        self.legend = pg.LegendItem(offset=(10, 10))
+        self.legend.setParentItem(self.anim_plot.graphicsItem())
+        
+        center_layout.addWidget(self.anim_plot)
+        
+        # Right panel (energy plots)
+        right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        
+        self.ke_plot = pg.PlotWidget(title="Kinetic Energy")
+        self.ke_plot.setLabel('bottom','Time (s)')
+        self.ke_plot.setLabel('left','Energy (J)')
+        self.ke_plot.showGrid(x=True, y=True)
+        right_layout.addWidget(self.ke_plot)
+        
+        self.pe_plot = pg.PlotWidget(title="Potential Energy")
+        self.pe_plot.setLabel('bottom','Time (s)')
+        self.pe_plot.setLabel('left','Energy (J)')
+        self.pe_plot.showGrid(x=True, y=True)
+        right_layout.addWidget(self.pe_plot)
+        
+        self.te_plot = pg.PlotWidget(title="Total Energy")
+        self.te_plot.setLabel('bottom','Time (s)')
+        self.te_plot.setLabel('left','Energy (J)')
+        self.te_plot.showGrid(x=True, y=True)
+        right_layout.addWidget(self.te_plot)
+        
+        # Add panels to main splitter
+        main_splitter.addWidget(left_panel)
+        main_splitter.addWidget(center_panel)
+        main_splitter.addWidget(right_panel)
+        
+        # Set initial sizes (15% left, 50% center, 35% right)
+        total_width = 1000  # Approximate total width
+        main_splitter.setSizes([int(total_width * 0.15), int(total_width * 0.50), int(total_width * 0.35)])
+        
+        main_layout = QtWidgets.QVBoxLayout(self)
+        main_layout.addWidget(main_splitter)
+
+        self.init_plot_items()
+
+    def init_plot_items(self):
+        """Initialize plot items for visualization."""
+        self.anim_items = []
+        self.trace_items = []
+        colors = ['red', 'blue', 'green']
+        for i, c in enumerate(colors):
+            r1 = pg.PlotDataItem(pen=pg.mkPen(c,width=2))
+            r2 = pg.PlotDataItem(pen=pg.mkPen(c,width=2))
+            b1 = pg.ScatterPlotItem(size=8,brush=pg.mkBrush(c))
+            b2 = pg.ScatterPlotItem(size=8,brush=pg.mkBrush(c))
+            trace = pg.PlotDataItem(pen=pg.mkPen(c, width=1, style=QtCore.Qt.DotLine))
+            for itm in (r1,r2,b1,b2,trace):
+                self.anim_plot.addItem(itm)
+            self.anim_items.append((r1,r2,b1,b2))
+            self.trace_items.append(trace)
+            self.legend.addItem(r1, f"Pendulum {i+1}")
+
+        self.energy_plots = {
+            'ke': {},
+            'pe': {},
+            'te': {}
+        }
+
+    def update_dt(self, value):
+        """Update simulation time step."""
+        self.dt = self.global_params['dt (s)']
+
+    def initSimulation(self):
+        """Initialize simulation parameters and timer."""
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.update)
+        self.timer.setInterval(16)  # 60 FPS
+        self.running = False
+        self.dt = 0.01
+        self.resetSimulation()
+
+    def resetSimulation(self):
+        """Reset the simulation to initial state."""
+        configs = []
+        colors = ['red', 'blue', 'green']
+        g = self.global_params['g (m/s²)']
+        
+        for i, params in enumerate(self.pendulum_params):
+            selected_type = self.integrator_buttons[i].checkedButton().text()
+            if selected_type == "Euler":
+                integrator_type = EulerPendulum
+            elif selected_type == "RK2":
+                integrator_type = RK2Pendulum
+            else:
+                integrator_type = RK4Pendulum
+                
+            configs.append(PendulumConfig(
+                name=f"Pendulum {i+1}",
+                color=colors[i],
+                integrator_type=integrator_type,
+                theta1=params['theta1 (°)'],
+                theta2=params['theta2 (°)'],
+                m1=params['m1 (kg)'],
+                m2=params['m2 (kg)'],
+                l1=params['l1 (m)'],
+                l2=params['l2 (m)'],
+                g=g
+            ))
+        
+        self.simulation = PendulumSimulation(configs)
+        
+        for r1,r2,b1,b2 in self.anim_items:
+            r1.clear(); r2.clear(); b1.clear(); b2.clear()
+        
+        for plot in [self.ke_plot, self.pe_plot, self.te_plot]:
+            plot.clear()
+        
+        for config in configs:
+            pen = pg.mkPen(config.color, width=2)
+            self.energy_plots['ke'][config.name] = self.ke_plot.plot(pen=pen)
+            self.energy_plots['pe'][config.name] = self.pe_plot.plot(pen=pen)
+            self.energy_plots['te'][config.name] = self.te_plot.plot(pen=pen)
+
+        max_length = max(p['l1 (m)'] + p['l2 (m)'] for p in self.pendulum_params)
+        rng = max_length * 1.2
+        self.anim_plot.getViewBox().setRange(xRange=(-rng,rng), yRange=(-rng,rng), padding=0)
+        
+        self.timer.stop()
+        self.start_btn.setText("Start")
+        self.running = False
+
+    def toggle(self):
+        """Toggle simulation running state."""
+        if self.running:
+            self.timer.stop()
+            self.start_btn.setText("Start")
+        else:
+            self.timer.start()
+            self.start_btn.setText("Pause")
+        self.running = not self.running
+
+    def update(self):
+        """Update simulation state and visualization."""
+        positions = self.simulation.step(self.dt)
+        
+        for i, (x1,y1,x2,y2) in enumerate(positions):
+            r1,r2,b1,b2 = self.anim_items[i]
+            r1.setData([0,x1],[0,y1])
+            r2.setData([x1,x2],[y1,y2])
+            b1.setData([x1],[y1])
+            b2.setData([x2],[y2])
+            
+            trace = self.trace_items[i]
+            trace_data = self.simulation.trace_data[f"Pendulum {i+1}"]
+            if trace_data['x']:
+                times = np.array(trace_data['times'])
+                current_time = times[-1]
+                opacities = np.clip((current_time - times) / self.simulation.trace_window, 0, 1)
+                color = pg.mkPen(self.simulation.pendulums[i].config.color, width=1, style=QtCore.Qt.DotLine)
+                trace.setData(trace_data['x'], trace_data['y'], pen=color)
+        
+        for name, data in self.simulation.energy_data.items():
+            self.energy_plots['ke'][name].setData(self.simulation.times, data['ke'])
+            self.energy_plots['pe'][name].setData(self.simulation.times, data['pe'])
+            self.energy_plots['te'][name].setData(self.simulation.times, data['te'])
+
+# ── Main application window ─────────────────────────────────────────────────
+
+class MainWindow(QtWidgets.QMainWindow):
+    """Main application window."""
+    def __init__(self):
+        super().__init__()
+        self.simulator = PendulumSimulator()
+        self.setCentralWidget(self.simulator)
+        self.setWindowTitle("Double Pendulum Simulator")
+
+if __name__ == '__main__':
+    app = QtWidgets.QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
