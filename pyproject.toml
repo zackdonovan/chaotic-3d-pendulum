@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "planar-double-pendulum"
+version = "1.0.0"
+description = "An interactive planar double-pendulum simulator with reproducible integrator diagnostics"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<3", "matplotlib>=3.7,<4"]
+
+[project.optional-dependencies]
+gui = ["pyqtgraph==0.13.7", "PySide6==6.8.3"]
+
+[project.scripts]
+pendulum-demo = "double_pendulum.cli:main"
+pendulum-gui = "double_pendulum.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["double_pendulum*"]

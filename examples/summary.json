@@ -1,0 +1,74 @@
+{
+  "model": "planar, point masses, massless rigid rods, no damping",
+  "duration_s": 10,
+  "dt_s": 0.01,
+  "initial_angles_degrees": [
+    120,
+    90
+  ],
+  "energy_scale_J": 29.43,
+  "methods": {
+    "euler": {
+      "max_abs_energy_drift_over_scale": 0.5996958965122453,
+      "final_energy_J": 27.39904559939907
+    },
+    "rk2": {
+      "max_abs_energy_drift_over_scale": 0.0002456797429096066,
+      "final_energy_J": 9.817223662897671
+    },
+    "rk4": {
+      "max_abs_energy_drift_over_scale": 2.418523914908994e-07,
+      "final_energy_J": 9.809993525514978
+    }
+  },
+  "convergence": {
+    "euler": {
+      "dt_s": [
+        0.01,
+        0.005,
+        0.0025
+      ],
+      "endpoint_state_l2_error": [
+        0.19640506114429776,
+        0.0884470996810125,
+        0.0420111086788297
+      ],
+      "observed_order": [
+        1.1509453662369,
+        1.0740439762166905
+      ]
+    },
+    "rk2": {
+      "dt_s": [
+        0.01,
+        0.005,
+        0.0025
+      ],
+      "endpoint_state_l2_error": [
+        0.0017700336453427832,
+        0.0004570565649177689,
+        0.00011618025170506323
+      ],
+      "observed_order": [
+        1.9533321556466263,
+        1.976007862419647
+      ]
+    },
+    "rk4": {
+      "dt_s": [
+        0.01,
+        0.005,
+        0.0025
+      ],
+      "endpoint_state_l2_error": [
+        2.92244294945342e-07,
+        1.9022000255544384e-08,
+        1.2123570131653115e-09
+      ],
+      "observed_order": [
+        3.941433995757148,
+        3.971782451284258
+      ]
+    }
+  }
+}
